@@ -86,7 +86,9 @@ def delay_sec_change():
 def get_local_time():
     try:
         response = network.requests.get(
-            "%s%s" % (os.getenv("SERVER_ORIGIN"), "/time"), timeout=REQUEST_TIMEOUT
+            "%s%s%s"
+            % (os.getenv("SERVER_ORIGIN"), "/time/", os.getenv("APP_TIMEZONE")),
+            timeout=REQUEST_TIMEOUT,
         )
     except Exception:
         pass

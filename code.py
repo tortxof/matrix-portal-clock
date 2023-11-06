@@ -8,6 +8,11 @@ from adafruit_matrixportal.matrixportal import MatrixPortal
 from adafruit_matrixportal.network import Network
 from adafruit_display_text.label import Label
 
+HEADERS = {
+    "X-Timezone": os.getenv("APP_TIMEZONE"),
+    "X-Location": os.getenv("APP_LOCATION"),
+}
+
 REQUEST_TIMEOUT = 0.5
 
 GET_TIME_INTERVAL = 3600
@@ -86,8 +91,8 @@ def delay_sec_change():
 def get_local_time():
     try:
         response = network.requests.get(
-            "%s%s%s"
-            % (os.getenv("SERVER_ORIGIN"), "/time/", os.getenv("APP_TIMEZONE")),
+            "%s%s" % (os.getenv("SERVER_ORIGIN"), "/time"),
+            headers=HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
     except Exception:
@@ -101,7 +106,9 @@ def get_local_time():
 def get_motd():
     try:
         response = network.requests.get(
-            "%s%s" % (os.getenv("SERVER_ORIGIN"), "/motd"), timeout=REQUEST_TIMEOUT
+            "%s%s" % (os.getenv("SERVER_ORIGIN"), "/motd"),
+            headers=HEADERS,
+            timeout=REQUEST_TIMEOUT,
         )
     except Exception:
         pass

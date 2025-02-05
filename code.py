@@ -68,7 +68,7 @@ root_group.append(bot_label)
 
 
 def render_datetime(now):
-    if now.tm_sec % 20 < 10:
+    if now.tm_sec % 10 < 5:
         top_label.text = "%04d-%02d-%02d" % (now.tm_year, now.tm_mon, now.tm_mday)
     else:
         top_label.text = "%s %s %02d" % (

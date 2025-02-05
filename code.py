@@ -115,7 +115,7 @@ def get_motd():
     else:
         try:
             response_data = response.json()
-        except ValueError:
+        except Exception:
             pass
         else:
             bot_label.text = response_data[0].center(10)

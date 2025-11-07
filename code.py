@@ -15,7 +15,7 @@ HEADERS = {
 
 REQUEST_TIMEOUT = 0.5
 
-GET_TIME_INTERVAL = 3600
+GET_TIME_INTERVAL = 300
 GET_MOTD_INTERVAL = 10
 
 MONTHS = [
@@ -49,6 +49,11 @@ matrixportal = MatrixPortal(status_neopixel=board.NEOPIXEL, bit_depth=4, debug=F
 network = Network()
 display = matrixportal.graphics.display
 
+# High-precision time tracking
+rtc_microseconds = 0  # Microseconds component from server
+rtc_set_time_ns = 0  # monotonic_ns() when RTC was set
+rtc_base_timestamp = 0  # Unix timestamp when RTC was set
+
 top_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 mid_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 bot_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
@@ -79,26 +84,75 @@ def render_datetime(now):
     mid_label.text = " %02d:%02d:%02d" % (now.tm_hour, now.tm_min, now.tm_sec)
 
 
+def get_precise_time():
+    """Get current time with microsecond precision."""
+    if rtc_set_time_ns == 0:
+        # RTC not yet set, return basic time
+        return time.localtime(), 0
+
+    # Calculate elapsed time since RTC was set
+    elapsed_ns = time.monotonic_ns() - rtc_set_time_ns
+    # Convert microseconds from server to nanoseconds and add elapsed time
+    total_ns = (rtc_microseconds * 1_000) + elapsed_ns
+
+    # Extract additional seconds from nanoseconds
+    additional_seconds = total_ns // 1_000_000_000
+    remaining_ns = total_ns % 1_000_000_000
+
+    # Calculate current time from base timestamp plus elapsed seconds
+    current_timestamp = rtc_base_timestamp + additional_seconds
+    current_time = time.localtime(current_timestamp)
+
+    return current_time, remaining_ns
+
+
 def delay_sec_change():
     while True:
-        now = time.localtime()
+        now, ns = get_precise_time()
         yield now
         last_sec = now.tm_sec
-        while time.localtime().tm_sec == last_sec:
+        while get_precise_time()[0].tm_sec == last_sec:
             time.sleep(0.1)
 
 
 def get_local_time():
+    global rtc_microseconds, rtc_set_time_ns, rtc_base_timestamp
     try:
+        # Measure network latency
+        request_start_ns = time.monotonic_ns()
         response = network.requests.get(
             "%s%s" % (os.getenv("SERVER_ORIGIN"), "/time"),
             headers=HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
+        request_end_ns = time.monotonic_ns()
     except Exception:
         pass
     else:
-        rtc.RTC().datetime = time.struct_time(response.json())
+        data = response.json()
+        # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds]
+        time_struct = time.struct_time(data[:9])
+        rtc.RTC().datetime = time_struct
+        rtc_microseconds = data[9] if len(data) > 9 else 0
+
+        # Account for network latency (estimate one-way delay as half of round-trip time)
+        round_trip_ns = request_end_ns - request_start_ns
+        one_way_latency_ns = round_trip_ns // 2
+
+        # Adjust the microseconds by adding the latency
+        rtc_microseconds += one_way_latency_ns // 1_000  # Convert ns to microseconds
+
+        # Handle overflow if microseconds >= 1 second
+        if rtc_microseconds >= 1_000_000:
+            additional_seconds = rtc_microseconds // 1_000_000
+            rtc_microseconds = rtc_microseconds % 1_000_000
+            # Adjust the time struct for additional seconds
+            adjusted_timestamp = time.mktime(time_struct) + additional_seconds
+            time_struct = time.localtime(adjusted_timestamp)
+            rtc.RTC().datetime = time_struct
+
+        rtc_set_time_ns = time.monotonic_ns()
+        rtc_base_timestamp = time.mktime(time_struct)
         return True
     return False
 

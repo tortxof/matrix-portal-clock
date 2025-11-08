@@ -52,6 +52,10 @@ display = matrixportal.graphics.display
 time_offset_ns = 0  # Nanoseconds offset from monotonic_ns() to real time
 time_is_set = False  # Whether we have synchronized time from server
 
+# DST transition tracking
+next_dst_change_timestamp = None  # Unix timestamp when next DST change occurs
+dst_offset_change_sec = None  # Seconds to add to time_offset_ns when DST changes
+
 top_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 mid_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 bot_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
@@ -84,12 +88,26 @@ def render_datetime(now):
 
 def get_precise_time():
     """Get current time with nanosecond precision using only monotonic_ns()."""
+    global time_offset_ns, next_dst_change_timestamp, dst_offset_change_sec
+    
     if not time_is_set:
         # Time not yet set, return epoch
         return time.localtime(0), 0
 
     # Current real time in nanoseconds = monotonic_ns() + offset
     current_time_ns = time.monotonic_ns() + time_offset_ns
+    
+    # Check if DST transition has occurred
+    if next_dst_change_timestamp is not None and dst_offset_change_sec is not None:
+        current_timestamp_check = current_time_ns // 1_000_000_000
+        if current_timestamp_check >= next_dst_change_timestamp:
+            # Apply DST offset change
+            time_offset_ns += dst_offset_change_sec * 1_000_000_000
+            # Clear DST transition data so we don't apply it again
+            next_dst_change_timestamp = None
+            dst_offset_change_sec = None
+            # Recalculate with new offset
+            current_time_ns = time.monotonic_ns() + time_offset_ns
     
     # Convert to seconds and remaining nanoseconds
     current_timestamp = current_time_ns // 1_000_000_000
@@ -109,7 +127,7 @@ def delay_sec_change():
 
 
 def get_local_time():
-    global time_offset_ns, time_is_set
+    global time_offset_ns, time_is_set, next_dst_change_timestamp, dst_offset_change_sec
     try:
         # Measure network latency
         request_start_ns = time.monotonic_ns()
@@ -123,7 +141,7 @@ def get_local_time():
         pass
     else:
         data = response.json()
-        # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds]
+        # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds, next_dst_change, dst_offset_change]
         time_struct = time.struct_time(data[:9])
         microseconds = data[9] if len(data) > 9 else 0
 
@@ -142,6 +160,17 @@ def get_local_time():
         # Therefore: offset = real_time_ns - monotonic_ns()
         time_offset_ns = server_time_ns - request_end_ns
         time_is_set = True
+        
+        # Parse DST transition info if provided
+        if len(data) > 10 and data[10] is not None:
+            next_dst_change_timestamp = data[10]
+        else:
+            next_dst_change_timestamp = None
+            
+        if len(data) > 11 and data[11] is not None:
+            dst_offset_change_sec = data[11]
+        else:
+            dst_offset_change_sec = None
         
         return True
     return False

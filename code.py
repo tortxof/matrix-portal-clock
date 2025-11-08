@@ -91,35 +91,29 @@ def get_precise_time():
     global time_offset_ns, next_dst_change_timestamp, dst_offset_change_sec
     
     if not time_is_set:
-        # Time not yet set, return epoch
         return time.localtime(0), 0
 
-    # Current real time in nanoseconds = monotonic_ns() + offset
-    current_time_ns = time.monotonic_ns() + time_offset_ns
+    monotonic_now = time.monotonic_ns()
+    current_time_ns = monotonic_now + time_offset_ns
     
     # Check if DST transition has occurred
     if next_dst_change_timestamp is not None and dst_offset_change_sec is not None:
         current_timestamp_check = current_time_ns // 1_000_000_000
         if current_timestamp_check >= next_dst_change_timestamp:
-            # Apply DST offset change
             time_offset_ns += dst_offset_change_sec * 1_000_000_000
-            # Clear DST transition data so we don't apply it again
             next_dst_change_timestamp = None
             dst_offset_change_sec = None
-            # Recalculate with new offset
-            current_time_ns = time.monotonic_ns() + time_offset_ns
+            current_time_ns = monotonic_now + time_offset_ns
     
-    # Convert to seconds and remaining nanoseconds
     current_timestamp = current_time_ns // 1_000_000_000
     remaining_ns = current_time_ns % 1_000_000_000
     
-    current_time = time.localtime(current_timestamp)
-    return current_time, remaining_ns
+    return time.localtime(current_timestamp), remaining_ns
 
 
 def delay_sec_change():
     while True:
-        now, ns = get_precise_time()
+        now, _ = get_precise_time()
         yield now
         last_sec = now.tm_sec
         while get_precise_time()[0].tm_sec == last_sec:
@@ -140,24 +134,22 @@ def get_local_time():
     except Exception:
         pass
     else:
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            return False
+        
         # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds, next_dst_change, dst_offset_change]
         time_struct = time.struct_time(data[:9])
         microseconds = data[9] if len(data) > 9 else 0
 
-        # Account for network latency (estimate one-way delay as half of round-trip time)
         round_trip_ns = request_end_ns - request_start_ns
         one_way_latency_ns = round_trip_ns // 2
 
-        # Convert server time to nanoseconds
         server_timestamp_sec = time.mktime(time_struct)
         server_time_ns = (server_timestamp_sec * 1_000_000_000) + (microseconds * 1_000)
-        
-        # Add latency adjustment
         server_time_ns += one_way_latency_ns
         
-        # Calculate offset: real_time_ns = monotonic_ns() + offset
-        # Therefore: offset = real_time_ns - monotonic_ns()
         time_offset_ns = server_time_ns - request_end_ns
         time_is_set = True
         

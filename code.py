@@ -1,7 +1,6 @@
 import os
 import time
 import board
-import rtc
 import displayio
 import terminalio
 from adafruit_matrixportal.matrixportal import MatrixPortal
@@ -49,10 +48,9 @@ matrixportal = MatrixPortal(status_neopixel=board.NEOPIXEL, bit_depth=4, debug=F
 network = Network()
 display = matrixportal.graphics.display
 
-# High-precision time tracking
-rtc_microseconds = 0  # Microseconds component from server
-rtc_set_time_ns = 0  # monotonic_ns() when RTC was set
-rtc_base_timestamp = 0  # Unix timestamp when RTC was set
+# Time tracking using only monotonic_ns()
+time_offset_ns = 0  # Nanoseconds offset from monotonic_ns() to real time
+time_is_set = False  # Whether we have synchronized time from server
 
 top_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 mid_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
@@ -85,24 +83,19 @@ def render_datetime(now):
 
 
 def get_precise_time():
-    """Get current time with microsecond precision."""
-    if rtc_set_time_ns == 0:
-        # RTC not yet set, return basic time
-        return time.localtime(), 0
+    """Get current time with nanosecond precision using only monotonic_ns()."""
+    if not time_is_set:
+        # Time not yet set, return epoch
+        return time.localtime(0), 0
 
-    # Calculate elapsed time since RTC was set
-    elapsed_ns = time.monotonic_ns() - rtc_set_time_ns
-    # Convert microseconds from server to nanoseconds and add elapsed time
-    total_ns = (rtc_microseconds * 1_000) + elapsed_ns
-
-    # Extract additional seconds from nanoseconds
-    additional_seconds = total_ns // 1_000_000_000
-    remaining_ns = total_ns % 1_000_000_000
-
-    # Calculate current time from base timestamp plus elapsed seconds
-    current_timestamp = rtc_base_timestamp + additional_seconds
+    # Current real time in nanoseconds = monotonic_ns() + offset
+    current_time_ns = time.monotonic_ns() + time_offset_ns
+    
+    # Convert to seconds and remaining nanoseconds
+    current_timestamp = current_time_ns // 1_000_000_000
+    remaining_ns = current_time_ns % 1_000_000_000
+    
     current_time = time.localtime(current_timestamp)
-
     return current_time, remaining_ns
 
 
@@ -116,7 +109,7 @@ def delay_sec_change():
 
 
 def get_local_time():
-    global rtc_microseconds, rtc_set_time_ns, rtc_base_timestamp
+    global time_offset_ns, time_is_set
     try:
         # Measure network latency
         request_start_ns = time.monotonic_ns()
@@ -132,27 +125,24 @@ def get_local_time():
         data = response.json()
         # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds]
         time_struct = time.struct_time(data[:9])
-        rtc.RTC().datetime = time_struct
-        rtc_microseconds = data[9] if len(data) > 9 else 0
+        microseconds = data[9] if len(data) > 9 else 0
 
         # Account for network latency (estimate one-way delay as half of round-trip time)
         round_trip_ns = request_end_ns - request_start_ns
         one_way_latency_ns = round_trip_ns // 2
 
-        # Adjust the microseconds by adding the latency
-        rtc_microseconds += one_way_latency_ns // 1_000  # Convert ns to microseconds
-
-        # Handle overflow if microseconds >= 1 second
-        if rtc_microseconds >= 1_000_000:
-            additional_seconds = rtc_microseconds // 1_000_000
-            rtc_microseconds = rtc_microseconds % 1_000_000
-            # Adjust the time struct for additional seconds
-            adjusted_timestamp = time.mktime(time_struct) + additional_seconds
-            time_struct = time.localtime(adjusted_timestamp)
-            rtc.RTC().datetime = time_struct
-
-        rtc_set_time_ns = time.monotonic_ns()
-        rtc_base_timestamp = time.mktime(time_struct)
+        # Convert server time to nanoseconds
+        server_timestamp_sec = time.mktime(time_struct)
+        server_time_ns = (server_timestamp_sec * 1_000_000_000) + (microseconds * 1_000)
+        
+        # Add latency adjustment
+        server_time_ns += one_way_latency_ns
+        
+        # Calculate offset: real_time_ns = monotonic_ns() + offset
+        # Therefore: offset = real_time_ns - monotonic_ns()
+        time_offset_ns = server_time_ns - request_end_ns
+        time_is_set = True
+        
         return True
     return False
 

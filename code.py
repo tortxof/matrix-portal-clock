@@ -48,13 +48,12 @@ matrixportal = MatrixPortal(status_neopixel=board.NEOPIXEL, bit_depth=4, debug=F
 network = Network()
 display = matrixportal.graphics.display
 
-# Time tracking using only monotonic_ns()
-time_offset_ns = 0  # Nanoseconds offset from monotonic_ns() to real time
-time_is_set = False  # Whether we have synchronized time from server
-
-# DST transition tracking
-next_dst_change_timestamp = None  # Unix timestamp when next DST change occurs
-dst_offset_change_sec = None  # Seconds to add to time_offset_ns when DST changes
+# Globals
+server_timestamp_ms = 0
+current_tz_offset_s = 0
+next_tz_change_ms = None
+next_tz_offset_s = None
+local_offset_ms = 0
 
 top_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
 mid_label = Label(terminalio.FONT, color=text_color, text=" " * 10)
@@ -86,42 +85,38 @@ def render_datetime(now):
     mid_label.text = " %02d:%02d:%02d" % (now.tm_hour, now.tm_min, now.tm_sec)
 
 
-def get_precise_time():
-    """Get current time with nanosecond precision using only monotonic_ns()."""
-    global time_offset_ns, next_dst_change_timestamp, dst_offset_change_sec
-    
-    if not time_is_set:
-        return time.localtime(0), 0
+def get_timestamp_ms():
+    return local_offset_ms + (time.monotonic_ns() // 1_000_000)
 
-    monotonic_now = time.monotonic_ns()
-    current_time_ns = monotonic_now + time_offset_ns
-    
-    # Check if DST transition has occurred
-    if next_dst_change_timestamp is not None and dst_offset_change_sec is not None:
-        current_timestamp_check = current_time_ns // 1_000_000_000
-        if current_timestamp_check >= next_dst_change_timestamp:
-            time_offset_ns += dst_offset_change_sec * 1_000_000_000
-            next_dst_change_timestamp = None
-            dst_offset_change_sec = None
-            current_time_ns = monotonic_now + time_offset_ns
-    
-    current_timestamp = current_time_ns // 1_000_000_000
-    remaining_ns = current_time_ns % 1_000_000_000
-    
-    return time.localtime(current_timestamp), remaining_ns
+
+def get_localtime():
+    global current_tz_offset_s, next_tz_change_ms, next_tz_offset_s
+
+    now_ms = get_timestamp_ms()
+
+    if next_tz_change_ms is not None and next_tz_offset_s is not None:
+        if now_ms >= next_tz_change_ms:
+            current_tz_offset_s = next_tz_offset_s
+            next_tz_change_ms = None
+            next_tz_offset_s = None
+
+    localtime_now_ms = now_ms + (current_tz_offset_s * 1000)
+
+    return time.localtime(localtime_now_ms // 1000)
 
 
 def delay_sec_change():
     while True:
-        now, _ = get_precise_time()
+        now = get_localtime()
         yield now
         last_sec = now.tm_sec
-        while get_precise_time()[0].tm_sec == last_sec:
+        while get_localtime().tm_sec == last_sec:
             time.sleep(0.1)
 
 
-def get_local_time():
-    global time_offset_ns, time_is_set, next_dst_change_timestamp, dst_offset_change_sec
+def fetch_time():
+    global server_timestamp_ms, current_tz_offset_s, next_tz_change_ms, next_tz_offset_s, local_offset_ms
+
     try:
         # Measure network latency
         request_start_ns = time.monotonic_ns()
@@ -132,40 +127,24 @@ def get_local_time():
         )
         request_end_ns = time.monotonic_ns()
     except Exception:
-        pass
-    else:
-        try:
-            data = response.json()
-        except Exception:
-            return False
-        
-        # Expecting: [year, mon, day, hour, min, sec, wday, yday, isdst, microseconds, next_dst_change, dst_offset_change]
-        time_struct = time.struct_time(data[:9])
-        microseconds = data[9] if len(data) > 9 else 0
+        return False
 
-        round_trip_ns = request_end_ns - request_start_ns
-        one_way_latency_ns = round_trip_ns // 2
+    try:
+        data = response.json()
+    except Exception:
+        return False
 
-        server_timestamp_sec = time.mktime(time_struct)
-        server_time_ns = (server_timestamp_sec * 1_000_000_000) + (microseconds * 1_000)
-        server_time_ns += one_way_latency_ns
-        
-        time_offset_ns = server_time_ns - request_end_ns
-        time_is_set = True
-        
-        # Parse DST transition info if provided
-        if len(data) > 10 and data[10] is not None:
-            next_dst_change_timestamp = data[10]
-        else:
-            next_dst_change_timestamp = None
-            
-        if len(data) > 11 and data[11] is not None:
-            dst_offset_change_sec = data[11]
-        else:
-            dst_offset_change_sec = None
-        
-        return True
-    return False
+    server_timestamp_ms = data[0]
+    current_tz_offset_s = data[1]
+    next_tz_change_ms = data[2]
+    next_tz_offset_s = data[3]
+
+    one_way_latency_ns = (request_end_ns - request_start_ns) // 2
+
+    local_request_time_ns = request_start_ns + one_way_latency_ns
+    local_offset_ms = server_timestamp_ms - (local_request_time_ns // 1_000_000)
+
+    return True
 
 
 def get_motd():
@@ -194,9 +173,14 @@ display.root_group = root_group
 last_time_update = last_motd_update = 0
 
 bot_label.text = "connecting"
+
 network.connect()
-if get_local_time():
-    last_time_update = time.monotonic()
+
+while not fetch_time():
+    time.sleep(1.0)
+
+last_time_update = time.monotonic()
+
 bot_label.text = ""
 if get_motd():
     last_motd_update = time.monotonic()
@@ -204,11 +188,8 @@ if get_motd():
 while True:
     for now in delay_sec_change():
         render_datetime(now)
-        if (
-            time.monotonic() > last_time_update + GET_TIME_INTERVAL
-            or last_time_update == 0
-        ):
-            if get_local_time():
+        if time.monotonic() > last_time_update + GET_TIME_INTERVAL:
+            if fetch_time():
                 last_time_update = time.monotonic()
         if time.monotonic() > last_motd_update + GET_MOTD_INTERVAL:
             if get_motd():
